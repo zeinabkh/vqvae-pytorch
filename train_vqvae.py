@@ -2,14 +2,33 @@
 
 import numpy as np
 import torch
-
+from VGG import *
 from PIL import Image
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR100, FashionMNIST, CIFAR10
 from vqvae import VQVAE
-
+import options
+def handle_inputs():
+    # Set indicator-dictionary for correctly retrieving / checking input options
+    # kwargs = {'single_task': False, 'only_MNIST': False, 'generative': True, 'compare_code': 'none'}
+    # # Define input options
+    kwargs = {}
+    parser = options.define_args(filename="train_vqvae", description='Replay effect')
+    parser = options.add_general_options(parser, **kwargs)
+    # parser = options.add_eval_options(parser, **kwargs)
+    # parser = options.add_task_options(parser, **kwargs)
+    # parser = options.add_model_options(parser, **kwargs)
+    # parser = options.add_train_options(parser, **kwargs)
+    # parser = options.add_replay_options(parser, **kwargs)
+    # parser = options.add_bir_options(parser, **kwargs)
+    # parser = options.add_allocation_options(parser, **kwargs)
+    # # Parse, process (i.e., set defaults for unselected options) and check chosen options
+    args = parser.parse_args()
+    # options.set_defaults(args, **kwargs)
+    # options.check_for_errors(args, **kwargs)
+    return args
 torch.set_printoptions(linewidth=160)
 
 
@@ -48,6 +67,15 @@ model_args = {
     "use_ema": use_ema,
     "decay": 0.99,
     "epsilon": 1e-5,
+    
+}
+general_args = {'dataset':'MNIST',
+                'epochs' : 7,
+                 'eval_every' : 100}
+datasets = {
+    'CIFAR100':CIFAR100,
+    'CIFAR10': CIFAR10,
+    'MNIST': FashionMNIST
 }
 model = VQVAE(**model_args).to(device)
 
@@ -62,7 +90,7 @@ transform = transforms.Compose(
     ]
 )
 data_root = "../data"
-train_dataset = CIFAR10(data_root, True, transform, download=True)
+train_dataset = datasets[general_args['dataset']](data_root, True, transform, download=True)
 train_data_variance = np.var(train_dataset.data / 255)
 train_loader = DataLoader(
     dataset=train_dataset,
@@ -82,11 +110,10 @@ optimizer = optim.Adam(train_params, lr=lr)
 criterion = nn.MSELoss()
 
 # Train model.
-epochs = 7
-eval_every = 100
+
 best_train_loss = float("inf")
 model.train()
-for epoch in range(epochs):
+for epoch in range(general_args['epochs']):
     total_train_loss = 0
     total_recon_error = 0
     n_train = 0
@@ -105,7 +132,7 @@ for epoch in range(epochs):
         optimizer.step()
         n_train += 1
 
-        if ((batch_idx + 1) % eval_every) == 0:
+        if ((batch_idx + 1) % general_args['eval_every']) == 0:
             print(f"epoch: {epoch}\nbatch_idx: {batch_idx + 1}", flush=True)
             total_train_loss /= n_train
             if total_train_loss < best_train_loss:
@@ -122,7 +149,7 @@ for epoch in range(epochs):
 # Generate and save reconstructions.
 model.eval()
 
-valid_dataset = CIFAR10(data_root, False, transform, download=True)
+valid_dataset = CIFAR100(data_root, False, transform, download=True)
 valid_loader = DataLoader(
     dataset=valid_dataset,
     batch_size=batch_size,
@@ -135,3 +162,41 @@ with torch.no_grad():
 
     save_img_tensors_as_grid(valid_tensors[0], 4, "true")
     save_img_tensors_as_grid(model(valid_tensors[0].to(device))["x_recon"], 4, "recon")
+
+
+# Train VGG 
+model = VGG16_NET() 
+model = model.to(device=device) 
+load_model = True
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr= lr) 
+
+
+for epoch in range(general_args['epochs_vgg']): #I decided to train the model for 50 epochs
+    loss_var = 0
+    
+    for idx, (images, labels) in enumerate(train_loader):
+        images = images.to(device=device)
+        labels = labels.to(device=device)
+        ## Forward Pass
+        optimizer.zero_grad()
+        scores = model(images)
+        loss = criterion(scores,labels)
+        loss.backward()
+        optimizer.step()
+        loss_var += loss.item()
+        if idx%64==0:
+            print(f'Epoch [{epoch+1}/{general_args['epochs_vgg']}] || Step [{idx+1}/{len(train_loader)}] || Loss:{loss_var/len(train_loader)}')
+    print(f"Loss at epoch {epoch+1} || {loss_var/len(train_loader)}")
+
+    with torch.no_grad():
+        correct = 0
+        samples = 0
+        for idx, (images, labels) in enumerate(valid_loader):
+            images = images.to(device=device)
+            labels = labels.to(device=device)
+            outputs = model(images)
+            _, preds = outputs.max(1)
+            correct += (preds == labels).sum()
+            samples += preds.size(0)
+        print(f"accuracy {float(correct) / float(samples) * 100:.2f} percentage || Correct {correct} out of {samples} samples")
